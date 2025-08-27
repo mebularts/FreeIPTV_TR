@@ -2,7 +2,7 @@ name: Sync EPG (TR)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Her saat (UTC). İstersen "*/30 * * * *" yapabilirsin.
+    - cron: "*/30 * * * *"   # Her 30 dk (UTC). İstersen 0 * * * * yap.
   workflow_dispatch: {}
 
 permissions:
@@ -11,6 +11,11 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      EPG_URL: https://epg.tvcdn.net/guide/tr-guide.xml
+      TARGET: epg.xml
+      # Sertifika hatasında -k ile indirmeye izin vermek için "true" yap:
+      ALLOW_INSECURE: "false"
     steps:
       - name: Checkout data branch
         uses: actions/checkout@v4
@@ -18,33 +23,65 @@ jobs:
           ref: data
           fetch-depth: 0
 
-      - name: Download & validate & update
-        env:
-          EPG_URL: https://epg.tvcdn.net/guide/tr-guide.xml
-          TARGET: epg.xml
+      - name: Download (with fallbacks) & validate
         run: |
           set -euo pipefail
-
           TMP="${TARGET}.new"
+          NOTE=""
 
-          # İndir (retry + sıkıştırma desteği)
-          curl -L --fail --retry 5 --retry-delay 10 --compressed \
+          echo "Trying secure HTTPS..."
+          if curl -L --fail --retry 3 --retry-delay 5 --compressed \
                -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
-               "$EPG_URL" -o "$TMP"
+               "$EPG_URL" -o "$TMP"; then
+            echo "Downloaded over HTTPS"
+          else
+            RC=$?
+            echo "HTTPS download failed with exit code $RC"
+            if [ "$RC" -eq 60 ]; then
+              # Sertifika hatası → HTTP fallback dene
+              HTTP_URL="${EPG_URL/https:/http:}"
+              echo "Trying HTTP fallback: $HTTP_URL"
+              if curl -L --fail --retry 3 --retry-delay 5 \
+                   -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
+                   "$HTTP_URL" -o "$TMP"; then
+                echo "Downloaded over HTTP (fallback)"
+                NOTE="[HTTP fallback]"
+              elif [ "${ALLOW_INSECURE}" = "true" ]; then
+                echo "Trying HTTPS with -k (INSECURE)"
+                if curl -k -L --fail --retry 1 \
+                     -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
+                     "$EPG_URL" -o "$TMP"; then
+                  echo "Downloaded over HTTPS with -k"
+                  NOTE="[INSECURE TLS]"
+                else
+                  echo "All download attempts failed"; exit $RC
+                fi
+              else
+                echo "Certificate error and insecure fallback disabled"; exit $RC
+              fi
+            else
+              echo "Non-certificate error"; exit $RC
+            fi
+          fi
 
-          # Basit XML doğrulaması (tek satır, here-doc yok)
+          # Basit XML doğrulaması
           python -c "import xml.etree.ElementTree as ET; ET.parse('${TARGET}.new')"
 
           # Değişmediyse çık
           if [ -f "$TARGET" ] && cmp -s "$TMP" "$TARGET"; then
             echo "No change"
             rm -f "$TMP"
+            # Commit adımına notu iletmek için boş NOTE yazalım
+            echo "NOTE=" >> $GITHUB_ENV
             exit 0
           fi
 
           # Güncelle ve .gz üret
           mv -f "$TMP" "$TARGET"
           gzip -c "$TARGET" > "${TARGET}.gz"
+
+          # Commit mesajı için notu aktar
+          echo "NOTE=$NOTE" >> $GITHUB_ENV
 
       - name: Commit & push if changed (to data)
         run: |
@@ -57,6 +94,6 @@ jobs:
             exit 0
           fi
 
-          MSG="update: epg.xml $(TZ='Europe/Istanbul' date '+%Y-%m-%d %H:%M %z')"
+          MSG="update: epg.xml $(TZ='Europe/Istanbul' date '+%Y-%m-%d %H:%M %z') ${NOTE}"
           git commit -m "$MSG"
           git push origin HEAD:data
