@@ -2,15 +2,11 @@ name: Sync EPG (TR)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Her saat (UTC) - istersen */30 yapabilirsin
-  workflow_dispatch: {}    # Elle tetikleme
+    - cron: "0 * * * *"   # Her saat (UTC). İstersen "*/30 * * * *" yapabilirsin.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
-
-concurrency:
-  group: sync-epg
-  cancel-in-progress: true
 
 jobs:
   sync:
@@ -22,7 +18,7 @@ jobs:
           ref: data
           fetch-depth: 0
 
-      - name: Download & validate XML (in-repo temp file)
+      - name: Download & validate & update
         env:
           EPG_URL: https://epg.tvcdn.net/guide/tr-guide.xml
           TARGET: epg.xml
@@ -36,26 +32,18 @@ jobs:
                -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
                "$EPG_URL" -o "$TMP"
 
-          # Boyut ve XML doğrulaması
-          test -s "$TMP"  # boş dosya olmasın
-          python - <<'PY'
-import sys, xml.etree.ElementTree as ET
-f = "epg.xml.new"
-ET.parse(f)
-print("XML OK")
-PY
+          # Basit XML doğrulaması (tek satır, here-doc yok)
+          python -c "import xml.etree.ElementTree as ET; ET.parse('${TARGET}.new')"
 
           # Değişmediyse çık
           if [ -f "$TARGET" ] && cmp -s "$TMP" "$TARGET"; then
-            echo "No change in $TARGET"
+            echo "No change"
             rm -f "$TMP"
             exit 0
           fi
 
-          # Atomik güncelleme
+          # Güncelle ve .gz üret
           mv -f "$TMP" "$TARGET"
-
-          # (Opsiyonel) .gz üret
           gzip -c "$TARGET" > "${TARGET}.gz"
 
       - name: Commit & push if changed (to data)
