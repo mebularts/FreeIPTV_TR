@@ -1,0 +1,71 @@
+name: Sync EPG (TR)
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # Her saat başı (UTC)
+  workflow_dispatch: {}    # Elle tetiklemek için
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-epg
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # epg.xml'in bulunduğu BRANCH: data
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          fetch-depth: 0   # değişiklik kontrolü için tam geçmiş
+
+      - name: Fetch & validate XML
+        env:
+          EPG_URL: https://epg.tvcdn.net/guide/tr-guide.xml
+          TARGET: epg.xml
+        run: |
+          set -euo pipefail
+
+          # İndir (retry + sıkıştırma desteği)
+          curl -L --fail --retry 5 --retry-delay 10 --compressed \
+            -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
+            "$EPG_URL" -o /tmp/epg.xml
+
+          # Basit XML doğrulaması (xmllint yoksa Python ile)
+          python - <<'PY'
+import xml.etree.ElementTree as ET
+ET.parse('/tmp/epg.xml')
+print('XML OK')
+PY
+
+          # Dosya değişmediyse erken çık
+          if [ -f "$TARGET" ] && cmp -s /tmp/epg.xml "$TARGET"; then
+            echo "No change in $TARGET"
+            exit 0
+          fi
+
+          # Güncel dosyayı yerleştir
+          mv /tmp/epg.xml "$TARGET"
+
+          # İsteğe bağlı: .gz üret (raw linkten tüketmek istersen)
+          gzip -c "$TARGET" > "$TARGET.gz"
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          MSG="update: epg.xml $(TZ='Europe/Istanbul' date '+%Y-%m-%d %H:%M %z')"
+          git commit -m "$MSG"
+          # data branch'ine push (checkout zaten data'daydı)
+          git push origin HEAD:data
