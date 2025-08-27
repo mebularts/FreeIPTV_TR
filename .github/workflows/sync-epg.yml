@@ -2,8 +2,8 @@ name: Sync EPG (TR)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Her saat başı (UTC)
-  workflow_dispatch: {}    # Elle tetiklemek için
+    - cron: "0 * * * *"   # Her saat (UTC) - istersen */30 yapabilirsin
+  workflow_dispatch: {}    # Elle tetikleme
 
 permissions:
   contents: write
@@ -16,45 +16,49 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # epg.xml'in bulunduğu BRANCH: data
       - name: Checkout data branch
         uses: actions/checkout@v4
         with:
           ref: data
-          fetch-depth: 0   # değişiklik kontrolü için tam geçmiş
+          fetch-depth: 0
 
-      - name: Fetch & validate XML
+      - name: Download & validate XML (in-repo temp file)
         env:
           EPG_URL: https://epg.tvcdn.net/guide/tr-guide.xml
           TARGET: epg.xml
         run: |
           set -euo pipefail
 
+          TMP="${TARGET}.new"
+
           # İndir (retry + sıkıştırma desteği)
           curl -L --fail --retry 5 --retry-delay 10 --compressed \
-            -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
-            "$EPG_URL" -o /tmp/epg.xml
+               -H "User-Agent: FreeIPTV_TR/Sync (+github-actions)" \
+               "$EPG_URL" -o "$TMP"
 
-          # Basit XML doğrulaması (xmllint yoksa Python ile)
+          # Boyut ve XML doğrulaması
+          test -s "$TMP"  # boş dosya olmasın
           python - <<'PY'
-import xml.etree.ElementTree as ET
-ET.parse('/tmp/epg.xml')
-print('XML OK')
+import sys, xml.etree.ElementTree as ET
+f = "epg.xml.new"
+ET.parse(f)
+print("XML OK")
 PY
 
-          # Dosya değişmediyse erken çık
-          if [ -f "$TARGET" ] && cmp -s /tmp/epg.xml "$TARGET"; then
+          # Değişmediyse çık
+          if [ -f "$TARGET" ] && cmp -s "$TMP" "$TARGET"; then
             echo "No change in $TARGET"
+            rm -f "$TMP"
             exit 0
           fi
 
-          # Güncel dosyayı yerleştir
-          mv /tmp/epg.xml "$TARGET"
+          # Atomik güncelleme
+          mv -f "$TMP" "$TARGET"
 
-          # İsteğe bağlı: .gz üret (raw linkten tüketmek istersen)
-          gzip -c "$TARGET" > "$TARGET.gz"
+          # (Opsiyonel) .gz üret
+          gzip -c "$TARGET" > "${TARGET}.gz"
 
-      - name: Commit & push if changed
+      - name: Commit & push if changed (to data)
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -67,5 +71,4 @@ PY
 
           MSG="update: epg.xml $(TZ='Europe/Istanbul' date '+%Y-%m-%d %H:%M %z')"
           git commit -m "$MSG"
-          # data branch'ine push (checkout zaten data'daydı)
           git push origin HEAD:data
